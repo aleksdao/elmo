@@ -50,7 +50,7 @@ init : ( Model, Cmd Msg )
 init =
     ( { collections = seed
       , newEntry = ""
-      , uid = 2
+      , uid = 4
       }
     , Cmd.none
     )
@@ -64,8 +64,9 @@ type Msg
     = NoOp
     | UpdateNewEntry String
     | EditingCollection Collection
-    | AddEntry Collection
-    | MoveEntry Direction
+    | AddEntry Int
+    | MoveEntryBetweenCollections Entry Collection Direction
+    | MoveEntryWithinCollection Collection
 
 
 
@@ -89,38 +90,139 @@ getIndexOf element list =
     indexOf list 0
 
 
+getElementAt : Int -> List a -> Maybe a
+getElementAt index list =
+    if index < 0 then
+        Nothing
+    else
+        List.head (List.drop index list)
+
+
+removeEntryFromCollection : Int -> Collection -> Collection
+removeEntryFromCollection entryId collection =
+    { collection | entries = List.filter (\entry -> entry.id /= entryId) collection.entries }
+
+
+addEntryToEndOfCollection : Entry -> Collection -> Collection
+addEntryToEndOfCollection entry collection =
+    { collection | entries = collection.entries ++ [ entry ] }
+
+
+getNextElement : Maybe Int -> List a -> Maybe a
+getNextElement index list =
+    case index of
+        Nothing ->
+            Nothing
+
+        Just index_ ->
+            getElementAt (index_ + 1) list
+
+
+getPreviousElement : Maybe Int -> List a -> Maybe a
+getPreviousElement index list =
+    case index of
+        Nothing ->
+            Nothing
+
+        Just index_ ->
+            getElementAt (index_ - 1) list
+
+
+getPreviousCollection : Maybe Int -> List Collection -> Maybe Collection
+getPreviousCollection index collections =
+    getPreviousElement index collections
+
+
+getNextCollection : Maybe Int -> List Collection -> Maybe Collection
+getNextCollection index collections =
+    getNextElement index collections
+
+
+
+-- getPrevious : a -> List a -> a
+-- getPrevious element list =
+--     let
+--         elementIndex =
+--             getIndexOf element list
+--     in
+--     List.tail (List.take elementIndex list)
+
+
 update : Msg -> Model -> ( Model, Cmd Msg )
 update msg model =
     case msg of
-        AddEntry collection ->
-            case getIndexOf collection model.collections of
-                Nothing ->
-                    ( { collections = model.collections, newEntry = "", uid = model.uid }, Cmd.none )
-
-                Just index ->
-                    ( { collections =
-                            List.take index model.collections
-                                ++ [ { collection
-                                        | entries =
-                                            collection.entries
-                                                ++ [ { id = model.uid, description = model.newEntry } ]
-                                     }
-                                   ]
-                                ++ List.drop (index + 1) model.collections
-                      , newEntry = ""
-                      , uid = model.uid + 1
-                      }
-                    , Cmd.none
-                    )
+        AddEntry collectionId ->
+            let
+                getCollection collection =
+                    if collectionId == collection.id then
+                        addEntryToEndOfCollection { id = model.uid, description = model.newEntry } collection
+                    else
+                        collection
+            in
+            ( { model | collections = List.map getCollection model.collections, uid = model.uid + 1 }, Cmd.none )
 
         UpdateNewEntry description ->
             ( { model | newEntry = description }, Cmd.none )
 
-        -- MoveEntry direction ->
+        MoveEntryBetweenCollections entry collection direction ->
+            let
+                originalCollectionIndex =
+                    getIndexOf collection model.collections
+
+                destinationCollectionWithEntry =
+                    case direction of
+                        Left ->
+                            let
+                                previousCollection =
+                                    getPreviousCollection originalCollectionIndex model.collections
+                            in
+                            case previousCollection of
+                                Nothing ->
+                                    Nothing
+
+                                Just foundCollection ->
+                                    Just <| addEntryToEndOfCollection entry foundCollection
+
+                        Right ->
+                            let
+                                nextCollection =
+                                    getNextCollection originalCollectionIndex model.collections
+                            in
+                            case nextCollection of
+                                Nothing ->
+                                    Nothing
+
+                                Just foundCollection ->
+                                    Just <| addEntryToEndOfCollection entry foundCollection
+
+                originalCollectionWithoutEntry =
+                    { collection | entries = List.filter (\entry_ -> entry_.id /= entry.id) collection.entries }
+            in
+            case destinationCollectionWithEntry of
+                Nothing ->
+                    ( model, Cmd.none )
+
+                Just validDestinationCollection ->
+                    ( { model
+                        | collections =
+                            List.map
+                                (\collection_ ->
+                                    if collection_.id == validDestinationCollection.id then
+                                        validDestinationCollection
+                                    else if collection_.id == originalCollectionWithoutEntry.id then
+                                        originalCollectionWithoutEntry
+                                    else
+                                        collection_
+                                )
+                                model.collections
+                      }
+                    , Cmd.none
+                    )
+
         EditingCollection collection ->
             case getIndexOf collection model.collections of
                 Nothing ->
-                    ( { model | collections = List.take 1 model.collections }, Cmd.none )
+                    ( model, Cmd.none )
 
                 Just index ->
                     if collection.editing == True then
@@ -132,7 +234,123 @@ update msg model =
             ( { collections = seed, newEntry = "", uid = model.uid }, Cmd.none )
 
 
+onEnter : Msg -> Html.Attribute Msg
+onEnter msg =
+    let
+        isEnter code =
+            if code == 13 then
+                Json.succeed msg
+            else
+                Json.fail "not Enter"
+    in
+    on "keyup" (Json.andThen isEnter Html.Events.keyCode)
 
+
+viewAddEntry : String -> Collection -> Html Msg
+viewAddEntry newEntry collection =
+    div []
+        [ input
+            [ placeholder "Add something for safekeeping"
+            , value
+                (if collection.editing == True then
+                    newEntry
+                 else
+                    ""
+                )
+            , onInput UpdateNewEntry
+            , onFocus (EditingCollection collection)
+            , onEnter (AddEntry collection.id)
+            ]
+            []
+        ]
+
+
+isFirstCollection : Collection -> List Collection -> Maybe Bool
+isFirstCollection collection collections =
+    let
+        index =
+            getIndexOf collection collections
+    in
+    case index of
+        Nothing ->
+            Nothing
+
+        Just index_ ->
+            Just (index_ == 0)
+
+
+isLastCollection : Collection -> List Collection -> Maybe Bool
+isLastCollection collection collections =
+    let
+        index =
+            getIndexOf collection collections
+    in
+    case index of
+        Nothing ->
+            Nothing
+
+        Just index_ ->
+            Just (index_ == (List.length collections - 1))
+
+
+viewArrow : Entry -> Collection -> Direction -> Html Msg
+viewArrow entry collection direction =
+    case direction of
+        Left ->
+            span [ onClick (MoveEntryBetweenCollections entry collection Left) ] [ text "<" ]
+
+        Right ->
+            span [ onClick (MoveEntryBetweenCollections entry collection Right) ] [ text ">" ]
+
+
+viewEntry : List Collection -> Collection -> Entry -> Html Msg
+viewEntry collections collection entry =
+    li []
+        [ div []
+            [ if isFirstCollection collection collections /= Just True then
+                viewArrow entry collection Left
+              else
+                text ""
+            , input [ value entry.description ] []
+            , if isLastCollection collection collections /= Just True then
+                viewArrow entry collection Right
+              else
+                text ""
+            ]
+        ]
+
+
+viewCollection : Model -> Collection -> Html Msg
+viewCollection model collection =
+    div []
+        [ text collection.description
+        , ul [] (List.map (viewEntry model.collections collection) collection.entries)
+        , viewAddEntry model.newEntry collection
+        ]
+
+
+view : Model -> Html Msg
+view model =
+    div [ class "flex" ]
+        (List.map (viewCollection model) model.collections)
+
+
+
+---- PROGRAM ----
+
+
+main : Program Never Model Msg
+main =
+    Html.program
+        { view = view
+        , init = init
+        , update = update
+        , subscriptions = always Sub.none
+        }
+
+
+
+-- List.map (\potentialCollection -> List.member myCollection [potentialCollection]) model.collections
 -- update msg model =
 --     case msg of
 --         UpdateNewTask text ->
@@ -196,84 +414,17 @@ update msg model =
 -- leftArrow : Model -> String -> Html Msg
 -- leftArrow model status =
 --     div [ text "<", onClick (MoveColumn Left) ] []
-
-
-onEnter : Msg -> Html.Attribute Msg
-onEnter msg =
-    let
-        isEnter code =
-            if code == 13 then
-                Json.succeed msg
-            else
-                Json.fail "not Enter"
-    in
-    on "keyup" (Json.andThen isEnter Html.Events.keyCode)
-
-
-viewAddEntry : String -> Collection -> Html Msg
-viewAddEntry newEntry collection =
-    div []
-        [ input
-            [ placeholder "Add something for safekeeping"
-            , value
-                (if collection.editing == True then
-                    newEntry
-                 else
-                    ""
-                )
-            , onInput UpdateNewEntry
-            , onFocus (EditingCollection collection)
-            , onEnter (AddEntry collection)
-            ]
-            []
-        ]
-
-
-viewArrow : Direction -> Html Msg
-viewArrow direction =
-    case direction of
-        Left ->
-            span [ onClick (MoveEntry Left) ] [ text "<" ]
-
-        Right ->
-            span [ onClick (MoveEntry Right) ] [ text ">" ]
-
-
-viewEntry : Collection -> Entry -> Html Msg
-viewEntry collection entry =
-    li []
-        [ div []
-            [ viewArrow Left
-            , input [ value entry.description ] []
-            , viewArrow Right
-            ]
-        ]
-
-
-viewCollection : Model -> Collection -> Html Msg
-viewCollection model collection =
-    div []
-        [ text collection.description
-        , ul [] (List.map (viewEntry collection) collection.entries)
-        , viewAddEntry model.newEntry collection
-        ]
-
-
-view : Model -> Html Msg
-view model =
-    div [ class "flex" ]
-        (List.map (viewCollection model) model.collections)
-
-
-
----- PROGRAM ----
-
-
-main : Program Never Model Msg
-main =
-    Html.program
-        { view = view
-        , init = init
-        , update = update
-        , subscriptions = always Sub.none
-        }
+-- List.map (\collection -> )
+-- case getIndexOf collection model.collections of
+--     Nothing ->
+--         ( { collections = model.collections, newEntry = "", uid = model.uid }, Cmd.none )
+--     Just index ->
+--         ( { collections =
+--                 List.take index model.collections
+--                     ++ [ addEntry { id = model.uid, description = model.newEntry } collection ]
+--                     ++ List.drop (index + 1) model.collections
+--           , newEntry = ""
+--           , uid = model.uid + 1
+--           }
+--         , Cmd.none
+--         )
