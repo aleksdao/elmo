@@ -16,7 +16,67 @@ img {
   display: flex;
 }
 
+.flex-direction-column {
+  flex-direction: column;
+}
+
+.flex-justify-start {
+  justify-content: flex-start;
+}
+
+.flex-justify-between {
+  justify-content: space-between;
+}
+
+.flex-justify-center {
+  justify-content: center;
+}
+
+.flex-align-center {
+  align-items: center;
+}
+
 ul {
   list-style: none;
   padding-left: 0;
+}
+
+.pad {
+  padding: 10px;
+}
+
+.pad-lr {
+  padding: 0 10px;
+}
+
+.pad-tb {
+  padding: 10px 0;
+}
+
+.border {
+  border: 1px solid black;
+}
+
+.modal {
+  position: fixed;
+  z-index: 1;
+  left: 0;
+  top: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0,0,0,0.4);
+}
+
+.modal-content {
+  width: 60%;
+  height: 75%;
+  background-color: white;
+}
+
+.text-align-right {
+  text-align: right;
+}
+
+.flex-item-grow {
+  flex: 1;
 }

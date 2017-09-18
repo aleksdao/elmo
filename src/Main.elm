@@ -1,12 +1,27 @@
-module Main exposing (..)
+port module Main exposing (..)
 
-import Html exposing (Html, div, h1, img, input, li, span, text, ul)
+import Dom exposing (focus)
+import Html exposing (Html, button, div, h1, img, input, li, span, text, ul)
 import Html.Attributes exposing (..)
-import Html.Events exposing (on, onClick, onFocus, onInput)
+import Html.Events exposing (on, onBlur, onClick, onFocus, onInput)
 import Json.Decode as Json
+import Navigation exposing (Location, newUrl)
+import Task
+import UrlParser exposing ((</>), int, map, oneOf, parseHash, parsePath, s, string, top)
 
 
----- MODEL ----
+port setStorage : Model -> Cmd msg
+
+
+updateWithStorage : Msg -> Model -> ( Model, Cmd Msg )
+updateWithStorage msg model =
+    let
+        ( newModel, cmds ) =
+            update msg model
+    in
+    ( newModel
+    , Cmd.batch [ setStorage newModel, cmds ]
+    )
 
 
 type Direction
@@ -14,9 +29,23 @@ type Direction
     | Right
 
 
+type Route
+    = Board Int
+    | Card Int
+    | Home
+    | NotFound
+
+
+type alias NewCollection =
+    { description : String
+    , inFocus : Bool
+    }
+
+
 type alias Entry =
     { id : Int
     , description : String
+    , editing : Bool
     }
 
 
@@ -29,7 +58,23 @@ type alias Collection =
 
 
 type alias Model =
-    { collections : List Collection, newEntry : String, uid : Int }
+    { collections : List Collection
+    , newEntry : String
+    , entryUid :
+        Int
+    , collectionUid : Int
+    , newCollection : NewCollection
+    , location : Location
+
+    -- , route : Maybe Route
+    -- , openEntry : Maybe Int
+    }
+
+
+
+-- type alias EntryOrCollection
+--     = Entry
+--     | Collection
 
 
 seed : List Collection
@@ -37,23 +82,43 @@ seed =
     [ { id = 0
       , description = "In Progress"
       , entries =
-            [ { id = 0, description = "Hello" }
-            , { id = 1, description = "Bye" }
+            [ { id = 0, description = "Hello", editing = False }
+            , { id = 1, description = "Bye", editing = False }
             ]
       , editing = False
       }
-    , { id = 1, description = "Done", entries = [ { id = 2, description = "Good morning" }, { id = 3, description = "Good night" } ], editing = False }
+    , { id = 1
+      , description = "Done"
+      , entries =
+            [ { id = 2
+              , description =
+                    "Good morning"
+              , editing = False
+              }
+            , { id = 3, description = "Good night", editing = False }
+            ]
+      , editing = False
+      }
     ]
 
 
-init : ( Model, Cmd Msg )
-init =
-    ( { collections = seed
-      , newEntry = ""
-      , uid = 4
-      }
-    , Cmd.none
-    )
+fakeInitialState : Location -> Model
+fakeInitialState location =
+    { collections = seed
+    , newEntry = ""
+    , entryUid = 4
+    , collectionUid = 2
+    , newCollection =
+        { inFocus = False
+        , description = ""
+        }
+    , location = { location | username = "placeholder", password = "placeholder" }
+    }
+
+
+init : Maybe Model -> Location -> ( Model, Cmd Msg )
+init localStorageState location =
+    ( Maybe.withDefault (fakeInitialState location) localStorageState, Cmd.none )
 
 
 
@@ -63,14 +128,19 @@ init =
 type Msg
     = NoOp
     | UpdateNewEntry String
+    | IsEditingEntry Collection Entry Bool
+    | DeleteEntry Int
+    | SetEntryNotEditing Collection Entry
+    | OpenEntry Entry
+    | UpdateNewCollection String
+    | ToggleNewCollectionFocus Bool
+    | AddNewCollection
     | EditingCollection Collection
     | AddEntry Int
     | MoveEntryBetweenCollections Entry Collection Direction
     | MoveEntryWithinCollection Collection
-
-
-
--- to do a findIndex at, need to compare on some value?
+    | UrlChange Location
+    | GoHome
 
 
 getIndexOf : a -> List a -> Maybe Int
@@ -138,14 +208,72 @@ getNextCollection index collections =
     getNextElement index collections
 
 
+setDescription : String -> NewCollection -> NewCollection
+setDescription description newCollection =
+    { newCollection | description = description }
 
--- getPrevious : a -> List a -> a
--- getPrevious element list =
---     let
---         elementIndex =
---             getIndexOf element list
---     in
---     List.tail (List.take elementIndex list)
+
+focusNewCollectionInput : Result Dom.Error a -> Msg
+focusNewCollectionInput result =
+    case result of
+        Ok _ ->
+            ToggleNewCollectionFocus True
+
+        Err _ ->
+            ToggleNewCollectionFocus False
+
+
+focusEntry : Result Dom.Error a -> Msg
+focusEntry result =
+    case result of
+        _ ->
+            NoOp
+
+
+getCard : Int -> List Collection -> Maybe Entry
+getCard cardId collections =
+    case collections of
+        [] ->
+            Nothing
+
+        a :: rest ->
+            let
+                card =
+                    a.entries
+                        |> List.filter (\entry -> entry.id == cardId)
+                        |> List.head
+            in
+            case card of
+                Just foundCard ->
+                    Just foundCard
+
+                Nothing ->
+                    getCard cardId rest
+
+
+updateCollectionInModel : Collection -> Model -> Model
+updateCollectionInModel updatedCollection model =
+    { model
+        | collections =
+            List.map
+                (\collection_ ->
+                    if collection_.id == updatedCollection.id then
+                        updatedCollection
+                    else
+                        collection_
+                )
+                model.collections
+    }
+
+
+getDOMidEntry : Entry -> String
+getDOMidEntry { id, description } =
+    String.join "-" [ toString id, description ]
+
+
+getDOMidCollection : Entry -> String
+getDOMidCollection { id, description } =
+    String.join "-" [ toString id, description ]
 
 
 update : Msg -> Model -> ( Model, Cmd Msg )
@@ -155,14 +283,111 @@ update msg model =
             let
                 getCollection collection =
                     if collectionId == collection.id then
-                        addEntryToEndOfCollection { id = model.uid, description = model.newEntry } collection
+                        addEntryToEndOfCollection
+                            { id = model.entryUid
+                            , description = model.newEntry
+                            , editing = False
+                            }
+                            collection
                     else
                         collection
             in
-            ( { model | collections = List.map getCollection model.collections, uid = model.uid + 1 }, Cmd.none )
+            ( { model
+                | collections = List.map getCollection model.collections
+                , entryUid = model.entryUid + 1
+                , newEntry = ""
+              }
+            , Cmd.none
+            )
 
         UpdateNewEntry description ->
             ( { model | newEntry = description }, Cmd.none )
+
+        IsEditingEntry collection entry isEditing ->
+            let
+                editingEntry =
+                    { entry | editing = True }
+
+                updatedCollection =
+                    { collection
+                        | entries =
+                            List.map
+                                (\entry_ ->
+                                    if entry_.id == editingEntry.id then
+                                        editingEntry
+                                    else
+                                        entry_
+                                )
+                                collection.entries
+                    }
+            in
+            ( updateCollectionInModel updatedCollection model
+            , Task.attempt focusEntry (focus (getDOMidEntry entry))
+            )
+
+        SetEntryNotEditing collection entry ->
+            let
+                updatedEntry =
+                    { entry | editing = False }
+
+                updatedCollection =
+                    { collection
+                        | entries =
+                            List.map
+                                (\entry_ ->
+                                    if entry_.id == updatedEntry.id then
+                                        updatedEntry
+                                    else
+                                        entry_
+                                )
+                                collection.entries
+                    }
+            in
+            ( updateCollectionInModel updatedCollection model
+            , Cmd.none
+            )
+
+        OpenEntry entry ->
+            ( model, Navigation.newUrl ("/entries/" ++ toString entry.id) )
+
+        ToggleNewCollectionFocus bool ->
+            let
+                newCollection_ =
+                    model.newCollection
+
+                newCollection =
+                    { newCollection_ | inFocus = bool }
+            in
+            ( { model | newCollection = newCollection }, Cmd.none )
+
+        UpdateNewCollection description ->
+            let
+                newCollection =
+                    model.newCollection
+                        |> setDescription description
+            in
+            ( { model | newCollection = newCollection }, Cmd.none )
+
+        AddNewCollection ->
+            let
+                collectionToAdd =
+                    { id = model.collectionUid
+                    , description =
+                        model.newCollection.description
+                    , entries = []
+                    , editing = False
+                    }
+
+                newCollection =
+                    { description = "", inFocus = False }
+            in
+            ( { model
+                | collections = model.collections ++ [ collectionToAdd ]
+                , newCollection = newCollection
+                , collectionUid = model.collectionUid + 1
+              }
+            , Task.attempt focusNewCollectionInput (focus "add-new-collection-input")
+            )
 
         MoveEntryBetweenCollections entry collection direction ->
             let
@@ -176,24 +401,16 @@ update msg model =
                                 previousCollection =
                                     getPreviousCollection originalCollectionIndex model.collections
                             in
-                            case previousCollection of
-                                Nothing ->
-                                    Nothing
-
-                                Just foundCollection ->
-                                    Just <| addEntryToEndOfCollection entry foundCollection
+                            previousCollection
+                                |> Maybe.map (addEntryToEndOfCollection entry)
 
                         Right ->
                             let
                                 nextCollection =
                                     getNextCollection originalCollectionIndex model.collections
                             in
-                            case nextCollection of
-                                Nothing ->
-                                    Nothing
-
-                                Just foundCollection ->
-                                    Just <| addEntryToEndOfCollection entry foundCollection
+                            nextCollection
+                                |> Maybe.map (addEntryToEndOfCollection entry)
 
                 originalCollectionWithoutEntry =
                     { collection | entries = List.filter (\entry_ -> entry_.id /= entry.id) collection.entries }
@@ -228,10 +445,56 @@ update msg model =
                     if collection.editing == True then
                         ( model, Cmd.none )
                     else
-                        ( { model | collections = List.map (\collection -> { collection | editing = False }) (List.take index model.collections) ++ [ { collection | editing = True } ] ++ List.map (\collection_ -> { collection_ | editing = False }) (List.drop (index + 1) model.collections) }, Cmd.none )
+                        let
+                            collections_ =
+                                List.map
+                                    (\collection_ ->
+                                        if collection_.id == collection.id then
+                                            { collection_ | editing = True }
+                                        else
+                                            { collection_ | editing = False }
+                                    )
+                                    model.collections
+                        in
+                        ( { model | collections = collections_, newEntry = "" }, Cmd.none )
+
+        UrlChange location ->
+            let
+                locationWithUsernamePassword =
+                    { location | username = "placeholder", password = "placeholder" }
+            in
+            ( { model | location = locationWithUsernamePassword }, Cmd.none )
+
+        -- so navigating to "" does not work, but putting a "/" resets the url to have an empty path?
+        GoHome ->
+            ( model, Navigation.newUrl "/" )
 
         _ ->
-            ( { collections = seed, newEntry = "", uid = model.uid }, Cmd.none )
+            ( model, Cmd.none )
+
+
+
+-- JS doesn't have the concept of Union Type, so we cannot use Route in the model. Makes more sense to store the
+-- current location; in the view, we can translate the location into a type of Route and display that... I think
+
+
+locationToRoute : Location -> Maybe Route
+locationToRoute location =
+    let
+        route =
+            oneOf
+                [ UrlParser.map Card (s "entries" </> int)
+                , UrlParser.map Home top
+                ]
+
+        _ =
+            Debug.log "Urlchange" route
+    in
+    parsePath route location
+
+
+
+-- keyboard event key decoding... gotta understand this a bit better
 
 
 onEnter : Msg -> Html.Attribute Msg
@@ -271,12 +534,7 @@ isFirstCollection collection collections =
         index =
             getIndexOf collection collections
     in
-    case index of
-        Nothing ->
-            Nothing
-
-        Just index_ ->
-            Just (index_ == 0)
+    Maybe.map (\index_ -> index_ == 0) index
 
 
 isLastCollection : Collection -> List Collection -> Maybe Bool
@@ -285,12 +543,7 @@ isLastCollection collection collections =
         index =
             getIndexOf collection collections
     in
-    case index of
-        Nothing ->
-            Nothing
-
-        Just index_ ->
-            Just (index_ == (List.length collections - 1))
+    Maybe.map (\index_ -> index_ == (List.length collections - 1)) index
 
 
 viewArrow : Entry -> Collection -> Direction -> Html Msg
@@ -303,15 +556,28 @@ viewArrow entry collection direction =
             span [ onClick (MoveEntryBetweenCollections entry collection Right) ] [ text ">" ]
 
 
+viewEntryEditing : Collection -> Entry -> Html Msg
+viewEntryEditing collection entry =
+    if entry.editing == True then
+        input [ value entry.description, onBlur (SetEntryNotEditing collection entry), id (getDOMidEntry entry) ] []
+    else
+        span [ onClick (OpenEntry entry), id (getDOMidEntry entry) ]
+            [ text entry.description ]
+
+
 viewEntry : List Collection -> Collection -> Entry -> Html Msg
 viewEntry collections collection entry =
     li []
-        [ div []
+        [ div [ class "flex flex-justify-between pad border" ]
             [ if isFirstCollection collection collections /= Just True then
                 viewArrow entry collection Left
               else
                 text ""
-            , input [ value entry.description ] []
+            , viewEntryEditing collection entry
+            , if entry.editing == False then
+                span [ onClick (IsEditingEntry collection entry True) ] [ text "E" ]
+              else
+                text ""
             , if isLastCollection collection collections /= Just True then
                 viewArrow entry collection Right
               else
@@ -329,102 +595,90 @@ viewCollection model collection =
         ]
 
 
+viewAddCollectionActions : Html Msg
+viewAddCollectionActions =
+    div [ class "flex flex-justify-start" ]
+        [ button [ name "Save", onClick AddNewCollection ] [ text "Save" ]
+        , span [] [ text "X" ]
+        ]
+
+
+viewAddCollection : Bool -> Html Msg
+viewAddCollection inFocus =
+    div [ class "flex flex-direction-column" ]
+        [ input
+            [ id "add-new-collection-input"
+            , placeholder "Add a list..."
+            , onInput UpdateNewCollection
+            , onFocus (ToggleNewCollectionFocus True)
+            ]
+            []
+        , if inFocus == True then
+            viewAddCollectionActions
+          else
+            text ""
+        ]
+
+
+viewEntryDetailed : Maybe Entry -> Html Msg
+viewEntryDetailed card =
+    case card of
+        Just foundCard ->
+            div [ class "modal-content flex flex-direction-column" ]
+                [ span [ class "text-align-right", onClick GoHome ] [ text "X" ]
+                , h1 [] [ text foundCard.description ]
+                ]
+
+        Nothing ->
+            text ""
+
+
+viewModal : Int -> List Collection -> Html Msg
+viewModal cardId collections =
+    div [ class "modal flex flex-justify-center flex-align-center" ]
+        [ viewEntryDetailed (getCard cardId collections) ]
+
+
 view : Model -> Html Msg
 view model =
-    div [ class "flex" ]
-        (List.map (viewCollection model) model.collections)
+    case locationToRoute model.location of
+        Just (Board id) ->
+            div [ class "flex" ]
+                (List.map (viewCollection model) model.collections
+                    ++ [ viewAddCollection model.newCollection.inFocus ]
+                )
+
+        Just NotFound ->
+            div [ class "flex" ]
+                (List.map (viewCollection model) model.collections
+                    ++ [ viewAddCollection model.newCollection.inFocus ]
+                )
+
+        Just (Card cardId) ->
+            div [ class "flex" ]
+                (List.map (viewCollection model) model.collections
+                    ++ [ viewAddCollection model.newCollection.inFocus ]
+                    ++ [ viewModal cardId model.collections ]
+                )
+
+        Just Home ->
+            div [ class "flex" ]
+                (List.map (viewCollection model) model.collections
+                    ++ [ viewAddCollection model.newCollection.inFocus ]
+                )
+
+        Nothing ->
+            div [ class "flex" ]
+                (List.map (viewCollection model) model.collections
+                    ++ [ viewAddCollection model.newCollection.inFocus ]
+                )
 
 
-
----- PROGRAM ----
-
-
-main : Program Never Model Msg
+main : Program (Maybe Model) Model Msg
 main =
-    Html.program
+    Navigation.programWithFlags UrlChange
         { view = view
         , init = init
-        , update = update
+        , update = updateWithStorage
         , subscriptions = always Sub.none
         }
-
-
-
--- List.map (\potentialCollection -> List.member myCollection [potentialCollection]) model.collections
--- update msg model =
---     case msg of
---         UpdateNewTask text ->
---             ( { model | newTask = text }, Cmd.none )
---         AddTask status ->
---             { model
---                 | tasks =
---                     if String.isEmpty model.newTask then
---                         model.tasks
---                     else
---                         model.tasks ++ [ { id = List.length model.tasks, description = model.newTask, status = status } ]
---                 , newTask = ""
---             }
---                 ! []
---         UpdateExistingTask taskId taskName ->
---             let
---                 updateTask task =
---                     if task.id == taskId then
---                         { task | name = taskName }
---                     else
---                         task
---             in
---             { model | tasks = List.map updateTask model.tasks }
---                 ! []
---         -- MoveColumn direction status ->
---         --     if direction == Left then
---         --     -- grab subset of elements up to this in columnOrder
---         _ ->
---             model ! []
----- VIEW ----
--- taskCard : Task -> Html Msg
--- taskCard task =
---     li []
---         [ input [ value task.name, onInput (UpdateExistingTask task.id) ] [ text task.name ] ]
--- filteredTaskCards : String -> List Task -> List (Html Msg)
--- filteredTaskCards status tasks =
---     tasks
---         |> List.filter (\task -> task.status == status)
---         |> List.map taskCard
--- taskCardsList : Model -> Task -> Html Msg
--- taskCardsList model status =
---     div []
---         [ h1 [] [ text status ]
---         , ul [] (filteredTaskCards status model.tasks)
---         , div [] [ addTask model status ]
---         ]
--- onEnter : Msg -> Html.Attribute Msg
--- onEnter msg =
---     let
---         isEnter code =
---             if code == 13 then
---                 Json.succeed msg
---             else
---                 Json.fail "not ENTER"
---     in
---     on "keyup" (Json.andThen isEnter Html.Events.keyCode)
--- addTask : Model -> String -> Html Msg
--- addTask model status =
---     input [ placeholder "Add a task", value model.newTask, onInput UpdateNewTask, onEnter (AddTask status) ]
---         []
--- leftArrow : Model -> String -> Html Msg
--- leftArrow model status =
---     div [ text "<", onClick (MoveColumn Left) ] []
--- List.map (\collection -> )
--- case getIndexOf collection model.collections of
---     Nothing ->
---         ( { collections = model.collections, newEntry = "", uid = model.uid }, Cmd.none )
---     Just index ->
---         ( { collections =
---                 List.take index model.collections
---                     ++ [ addEntry { id = model.uid, description = model.newEntry } collection ]
---                     ++ List.drop (index + 1) model.collections
---           , newEntry = ""
---           , uid = model.uid + 1
---           }
---         , Cmd.none
---         )
