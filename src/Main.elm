@@ -1,5 +1,6 @@
 port module Main exposing (..)
 
+import Css
 import Dom exposing (focus)
 import Html exposing (Html, button, div, h1, img, input, li, span, text, ul)
 import Html.Attributes exposing (..)
@@ -8,6 +9,11 @@ import Json.Decode as Json
 import Navigation exposing (Location, newUrl)
 import Task
 import UrlParser exposing ((</>), int, map, oneOf, parseHash, parsePath, s, string, top)
+
+
+styles : List Css.Style -> Html.Attribute msg
+styles =
+    Css.asPairs >> Html.Attributes.style
 
 
 port setStorage : Model -> Cmd msg
@@ -118,7 +124,10 @@ fakeInitialState location =
 
 init : Maybe Model -> Location -> ( Model, Cmd Msg )
 init localStorageState location =
-    ( Maybe.withDefault (fakeInitialState location) localStorageState, Cmd.none )
+    ( Maybe.withDefault (fakeInitialState location)
+        (Maybe.map (\localStorageState_ -> { localStorageState_ | location = location }) localStorageState)
+    , Cmd.none
+    )
 
 
 
@@ -230,25 +239,20 @@ focusEntry result =
             NoOp
 
 
-getCard : Int -> List Collection -> Maybe Entry
-getCard cardId collections =
+getCardAndCollection : Int -> List Collection -> Maybe ( Entry, Collection )
+getCardAndCollection cardId collections =
     case collections of
         [] ->
             Nothing
 
-        a :: rest ->
+        collection :: rest ->
             let
                 card =
-                    a.entries
+                    collection.entries
                         |> List.filter (\entry -> entry.id == cardId)
                         |> List.head
             in
-            case card of
-                Just foundCard ->
-                    Just foundCard
-
-                Nothing ->
-                    getCard cardId rest
+            Maybe.withDefault (getCardAndCollection cardId rest) (Maybe.map (\card_ -> Just ( card_, collection )) card)
 
 
 updateCollectionInModel : Collection -> Model -> Model
@@ -350,6 +354,21 @@ update msg model =
         OpenEntry entry ->
             ( model, Navigation.newUrl ("/entries/" ++ toString entry.id) )
 
+        DeleteEntry entryId ->
+            case getCardAndCollection entryId model.collections of
+                Just ( card, collection ) ->
+                    let
+                        updatedCollection =
+                            removeEntryFromCollection entryId collection
+
+                        updatedModel =
+                            updateCollectionInModel updatedCollection model
+                    in
+                    ( updatedModel, Navigation.newUrl "/" )
+
+                Nothing ->
+                    ( model, Cmd.none )
+
         ToggleNewCollectionFocus bool ->
             let
                 newCollection_ =
@@ -415,26 +434,27 @@ update msg model =
                 originalCollectionWithoutEntry =
                     { collection | entries = List.filter (\entry_ -> entry_.id /= entry.id) collection.entries }
             in
-            case destinationCollectionWithEntry of
-                Nothing ->
-                    ( model, Cmd.none )
-
-                Just validDestinationCollection ->
-                    ( { model
-                        | collections =
-                            List.map
-                                (\collection_ ->
-                                    if collection_.id == validDestinationCollection.id then
-                                        validDestinationCollection
-                                    else if collection_.id == originalCollectionWithoutEntry.id then
-                                        originalCollectionWithoutEntry
-                                    else
-                                        collection_
-                                )
-                                model.collections
-                      }
-                    , Cmd.none
+            Maybe.withDefault ( model, Cmd.none )
+                (Maybe.map
+                    (\validDestinationCollection ->
+                        ( { model
+                            | collections =
+                                List.map
+                                    (\collection_ ->
+                                        if collection_.id == validDestinationCollection.id then
+                                            validDestinationCollection
+                                        else if collection_.id == originalCollectionWithoutEntry.id then
+                                            originalCollectionWithoutEntry
+                                        else
+                                            collection_
+                                    )
+                                    model.collections
+                          }
+                        , Cmd.none
+                        )
                     )
+                    destinationCollectionWithEntry
+                )
 
         EditingCollection collection ->
             case getIndexOf collection model.collections of
@@ -620,23 +640,37 @@ viewAddCollection inFocus =
         ]
 
 
-viewEntryDetailed : Maybe Entry -> Html Msg
-viewEntryDetailed card =
-    case card of
-        Just foundCard ->
-            div [ class "modal-content flex flex-direction-column" ]
-                [ span [ class "text-align-right", onClick GoHome ] [ text "X" ]
-                , h1 [] [ text foundCard.description ]
-                ]
+viewEntryDetailed : Maybe ( Entry, Collection ) -> Html Msg
+viewEntryDetailed cardCollectionTuple =
+    Maybe.withDefault (text "")
+        (Maybe.map
+            (\( card, collection ) ->
+                div [ class "modal-content flex flex-direction-column" ]
+                    [ span [ class "text-align-right", onClick GoHome ] [ text "X" ]
+                    , h1 [] [ text card.description ]
+                    , button [ styles [ Css.backgroundColor (Css.hex "FF0000") ], onClick (DeleteEntry card.id) ] [ text "Delete" ]
+                    ]
+            )
+            cardCollectionTuple
+        )
 
-        Nothing ->
-            text ""
+
+
+-- case card of
+--     Just foundCard ->
+--         div [ class "modal-content flex flex-direction-column" ]
+--             [ span [ class "text-align-right", onClick GoHome ] [ text "X" ]
+--             , h1 [] [ text foundCard.description ]
+--             , button [ styles [ Css.backgroundColor (Css.hex "FF0000") ], onClick (DeleteEntry foundCard.id) ] [ text "Delete" ]
+--             ]
+--     Nothing ->
+--         text ""
 
 
 viewModal : Int -> List Collection -> Html Msg
 viewModal cardId collections =
     div [ class "modal flex flex-justify-center flex-align-center" ]
-        [ viewEntryDetailed (getCard cardId collections) ]
+        [ viewEntryDetailed (getCardAndCollection cardId collections) ]
 
 
 view : Model -> Html Msg
