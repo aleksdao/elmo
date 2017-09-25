@@ -5,8 +5,11 @@ import Dom exposing (focus)
 import Html exposing (Html, button, div, h1, img, input, li, span, text, ul)
 import Html.Attributes exposing (..)
 import Html.Events exposing (on, onBlur, onClick, onFocus, onInput)
-import Json.Decode as Json
+import Html5.DragDrop as DragDrop
+import Json.Decode exposing (Decoder, decodeValue, field)
+import Json.Encode exposing (Value, bool, list, object, string)
 import Navigation exposing (Location, newUrl)
+import Result
 import Task
 import UrlParser exposing ((</>), int, map, oneOf, parseHash, parsePath, s, string, top)
 
@@ -16,7 +19,45 @@ styles =
     Css.asPairs >> Html.Attributes.style
 
 
-port setStorage : Model -> Cmd msg
+port setStorage : Value -> Cmd msg
+
+
+encodeEntry : Entry -> Value
+encodeEntry entry =
+    object
+        [ ( "id", Json.Encode.int entry.id )
+        , ( "description", Json.Encode.string entry.description )
+        , ( "editing", bool entry.editing )
+        ]
+
+
+encodeCollection : Collection -> Value
+encodeCollection collection =
+    object
+        [ ( "id", Json.Encode.int collection.id )
+        , ( "description", Json.Encode.string collection.description )
+        , ( "entries", Json.Encode.list (List.map encodeEntry collection.entries) )
+        , ( "editing", bool collection.editing )
+        ]
+
+
+encodeNewCollection : NewCollection -> Value
+encodeNewCollection newCollection =
+    object
+        [ ( "description", Json.Encode.string newCollection.description )
+        , ( "inFocus", Json.Encode.bool newCollection.inFocus )
+        ]
+
+
+convertModelToValue : Model -> Value
+convertModelToValue model =
+    object
+        [ ( "collections", Json.Encode.list (List.map encodeCollection model.collections) )
+        , ( "newEntry", Json.Encode.string model.newEntry )
+        , ( "entryUid", Json.Encode.int model.entryUid )
+        , ( "collectionUid", Json.Encode.int model.collectionUid )
+        , ( "newCollection", encodeNewCollection model.newCollection )
+        ]
 
 
 updateWithStorage : Msg -> Model -> ( Model, Cmd Msg )
@@ -26,7 +67,7 @@ updateWithStorage msg model =
             update msg model
     in
     ( newModel
-    , Cmd.batch [ setStorage newModel, cmds ]
+    , Cmd.batch [ setStorage (convertModelToValue newModel), cmds ]
     )
 
 
@@ -35,9 +76,10 @@ type Direction
     | Right
 
 
-type Route
-    = Board Int
-    | Card Int
+type
+    Route
+    -- = Board Int
+    = Card Int
     | Home
     | NotFound
 
@@ -66,21 +108,15 @@ type alias Collection =
 type alias Model =
     { collections : List Collection
     , newEntry : String
-    , entryUid :
-        Int
+    , entryUid : Int
     , collectionUid : Int
     , newCollection : NewCollection
     , location : Location
+    , dragDrop : DragDrop.Model ( Collection, Entry ) Collection
 
-    -- , route : Maybe Route
-    -- , openEntry : Maybe Int
+    -- , result : DragDrop.Model ( Collection, Entry ) Int
+    -- , droppableSection : ( Collection, Entry )
     }
-
-
-
--- type alias EntryOrCollection
---     = Entry
---     | Collection
 
 
 seed : List Collection
@@ -118,14 +154,63 @@ fakeInitialState location =
         { inFocus = False
         , description = ""
         }
-    , location = { location | username = "placeholder", password = "placeholder" }
+    , location = location
+    , dragDrop = DragDrop.init
+
+    -- , result = DragDrop.init
     }
 
 
-init : Maybe Model -> Location -> ( Model, Cmd Msg )
+entryDecoder : Decoder Entry
+entryDecoder =
+    Json.Decode.map3 Entry
+        (field "id" Json.Decode.int)
+        (field "description" Json.Decode.string)
+        (field "editing" Json.Decode.bool)
+
+
+collectionDecoder : Decoder Collection
+collectionDecoder =
+    Json.Decode.map4 Collection
+        (field "id" Json.Decode.int)
+        (field "description" Json.Decode.string)
+        (field "entries" (Json.Decode.list entryDecoder))
+        (field "editing" Json.Decode.bool)
+
+
+newCollectionDecoder : Decoder NewCollection
+newCollectionDecoder =
+    Json.Decode.map2 NewCollection
+        (field "description" Json.Decode.string)
+        (field "inFocus" Json.Decode.bool)
+
+
+modelDecoder : Location -> Decoder Model
+modelDecoder location =
+    Json.Decode.map7 Model
+        (field "collections" (Json.Decode.list collectionDecoder))
+        (field "newEntry" Json.Decode.string)
+        (field "entryUid" Json.Decode.int)
+        (field "collectionUid" Json.Decode.int)
+        (field "newCollection" newCollectionDecoder)
+        (Json.Decode.succeed location)
+        (Json.Decode.succeed DragDrop.init)
+
+
+
+-- (Json.Decode.succeed DragDrop.init)
+-- Initially I had planned to decode the Json.Decode.Value into a ModelMissingACoupleProperties, then update it in the init function.
+-- However, I learned from the helply Elm Slack channel that I wouldn't be able to add fields onto the Record I had decoded, so I would
+-- have manually had to map each field over to a new Model record. Instead, it was recommended that I use `succeed` to map additional
+-- fields that would not be coming off the Json.Decodde.Value object
+
+
+init : Maybe Json.Decode.Value -> Location -> ( Model, Cmd Msg )
 init localStorageState location =
-    ( Maybe.withDefault (fakeInitialState location)
-        (Maybe.map (\localStorageState_ -> { localStorageState_ | location = location }) localStorageState)
+    ( localStorageState
+        |> Maybe.map (decodeValue (modelDecoder location))
+        |> Maybe.withDefault (Err "")
+        |> Result.withDefault (fakeInitialState location)
     , Cmd.none
     )
 
@@ -150,6 +235,7 @@ type Msg
     | MoveEntryWithinCollection Collection
     | UrlChange Location
     | GoHome
+    | DragDropMsg (DragDrop.Msg ( Collection, Entry ) Collection)
 
 
 getIndexOf : a -> List a -> Maybe Int
@@ -489,6 +575,40 @@ update msg model =
         GoHome ->
             ( model, Navigation.newUrl "/" )
 
+        DragDropMsg msg_ ->
+            let
+                ( model_, result ) =
+                    DragDrop.update msg_ model.dragDrop
+
+                _ =
+                    Debug.log "there it is" result
+            in
+            ( { model
+                | dragDrop = model_
+                , collections =
+                    case result of
+                        Just ( ( srcCollection, entry ), destinationCollection ) ->
+                            if destinationCollection == srcCollection then
+                                model.collections
+                            else
+                                let
+                                    updatedSrcCollection =
+                                        removeEntryFromCollection entry.id srcCollection
+
+                                    updatedDestinationCollection =
+                                        addEntryToEndOfCollection entry destinationCollection
+
+                                    model_ =
+                                        updateCollectionInModel updatedSrcCollection model
+                                in
+                                .collections (updateCollectionInModel updatedDestinationCollection model_)
+
+                        Nothing ->
+                            model.collections
+              }
+            , Cmd.none
+            )
+
         _ ->
             ( model, Cmd.none )
 
@@ -508,7 +628,7 @@ locationToRoute location =
                 ]
 
         _ =
-            Debug.log "Urlchange" route
+            Debug.log "Urlchange" ( route, location )
     in
     parsePath route location
 
@@ -522,11 +642,11 @@ onEnter msg =
     let
         isEnter code =
             if code == 13 then
-                Json.succeed msg
+                Json.Decode.succeed msg
             else
-                Json.fail "not Enter"
+                Json.Decode.fail "not Enter"
     in
-    on "keyup" (Json.andThen isEnter Html.Events.keyCode)
+    on "keyup" (Json.Decode.andThen isEnter Html.Events.keyCode)
 
 
 viewAddEntry : String -> Collection -> Html Msg
@@ -585,10 +705,22 @@ viewEntryEditing collection entry =
             [ text entry.description ]
 
 
-viewEntry : List Collection -> Collection -> Entry -> Html Msg
-viewEntry collections collection entry =
+isBeingDragged : Maybe ( Collection, Entry ) -> Entry -> Bool
+isBeingDragged dragId entry =
+    dragId |> Maybe.map (\( collection, dragEntry ) -> entry.id == dragEntry.id) |> Maybe.withDefault False
+
+
+viewEntry : Model -> Collection -> Entry -> Html Msg
+viewEntry { collections, dragDrop } collection entry =
+    let
+        hideStyle =
+            if isBeingDragged (DragDrop.getDragId dragDrop) entry then
+                style [ ( "display", "none" ) ]
+            else
+                style []
+    in
     li []
-        [ div [ class "flex flex-justify-between pad border" ]
+        [ div (class "flex flex-justify-between pad border" :: hideStyle :: DragDrop.draggable DragDropMsg ( collection, entry ))
             [ if isFirstCollection collection collections /= Just True then
                 viewArrow entry collection Left
               else
@@ -606,11 +738,51 @@ viewEntry collections collection entry =
         ]
 
 
+droppableCardArea : Model -> Collection -> Html Msg
+droppableCardArea { dragDrop } collection =
+    let
+        dropId =
+            DragDrop.getDropId dragDrop
+
+        highlight =
+            if dropId |> Maybe.map ((==) collection) |> Maybe.withDefault False then
+                class "card"
+            else
+                class "display-none"
+    in
+    div (highlight :: []) []
+
+
 viewCollection : Model -> Collection -> Html Msg
 viewCollection model collection =
-    div []
+    let
+        dropId =
+            DragDrop.getDropId model.dragDrop
+
+        dragId =
+            DragDrop.getDragId model.dragDrop
+
+        highlight =
+            if dropId |> Maybe.map ((==) collection) |> Maybe.withDefault False then
+                if dragId |> Maybe.map (\( { id }, entry ) -> id /= collection.id) |> Maybe.withDefault False then
+                    style [ ( "background-color", "cyan" ) ]
+                else
+                    style []
+            else
+                style []
+    in
+    div
+        (styles
+            [ Css.border3 (Css.px 1) Css.solid (Css.hex "333")
+            , Css.margin2 (Css.px 0) (Css.px 10)
+            , Css.padding2 (Css.px 10) (Css.px 10)
+            , Css.flex3 (Css.int 1) (Css.int 1) (Css.int 0)
+            ]
+            :: highlight
+            :: DragDrop.droppable DragDropMsg collection
+        )
         [ text collection.description
-        , ul [] (List.map (viewEntry model.collections collection) collection.entries)
+        , ul [] (List.map (viewEntry model collection) collection.entries ++ [ droppableCardArea model collection ])
         , viewAddEntry model.newEntry collection
         ]
 
@@ -625,12 +797,13 @@ viewAddCollectionActions =
 
 viewAddCollection : Bool -> Html Msg
 viewAddCollection inFocus =
-    div [ class "flex flex-direction-column" ]
+    div [ class "flex flex-direction-column", styles [ Css.flex3 (Css.int 1) (Css.int 1) (Css.int 0) ] ]
         [ input
             [ id "add-new-collection-input"
             , placeholder "Add a list..."
             , onInput UpdateNewCollection
             , onFocus (ToggleNewCollectionFocus True)
+            , onEnter AddNewCollection
             ]
             []
         , if inFocus == True then
@@ -655,18 +828,6 @@ viewEntryDetailed cardCollectionTuple =
         )
 
 
-
--- case card of
---     Just foundCard ->
---         div [ class "modal-content flex flex-direction-column" ]
---             [ span [ class "text-align-right", onClick GoHome ] [ text "X" ]
---             , h1 [] [ text foundCard.description ]
---             , button [ styles [ Css.backgroundColor (Css.hex "FF0000") ], onClick (DeleteEntry foundCard.id) ] [ text "Delete" ]
---             ]
---     Nothing ->
---         text ""
-
-
 viewModal : Int -> List Collection -> Html Msg
 viewModal cardId collections =
     div [ class "modal flex flex-justify-center flex-align-center" ]
@@ -675,40 +836,37 @@ viewModal cardId collections =
 
 view : Model -> Html Msg
 view model =
-    case locationToRoute model.location of
-        Just (Board id) ->
-            div [ class "flex" ]
-                (List.map (viewCollection model) model.collections
-                    ++ [ viewAddCollection model.newCollection.inFocus ]
-                )
+    let
+        routeView =
+            case locationToRoute model.location of
+                -- Just (Board id) ->
+                --     [ viewAddCollection model.newCollection.inFocus ]
+                --         |> List.append (List.map (viewCollection model) model.collections)
+                Just NotFound ->
+                    List.map (viewCollection model) model.collections
+                        ++ [ viewAddCollection model.newCollection.inFocus ]
 
-        Just NotFound ->
-            div [ class "flex" ]
-                (List.map (viewCollection model) model.collections
-                    ++ [ viewAddCollection model.newCollection.inFocus ]
-                )
+                Just (Card cardId) ->
+                    List.map (viewCollection model) model.collections
+                        ++ [ viewAddCollection model.newCollection.inFocus ]
+                        ++ [ viewModal cardId model.collections ]
 
-        Just (Card cardId) ->
-            div [ class "flex" ]
-                (List.map (viewCollection model) model.collections
-                    ++ [ viewAddCollection model.newCollection.inFocus ]
-                    ++ [ viewModal cardId model.collections ]
-                )
+                Just Home ->
+                    List.map (viewCollection model) model.collections
+                        ++ [ viewAddCollection model.newCollection.inFocus ]
 
-        Just Home ->
-            div [ class "flex" ]
-                (List.map (viewCollection model) model.collections
-                    ++ [ viewAddCollection model.newCollection.inFocus ]
-                )
-
-        Nothing ->
-            div [ class "flex" ]
-                (List.map (viewCollection model) model.collections
-                    ++ [ viewAddCollection model.newCollection.inFocus ]
-                )
+                Nothing ->
+                    List.map (viewCollection model) model.collections
+                        ++ [ viewAddCollection model.newCollection.inFocus ]
+    in
+    div [ styles [ Css.marginTop (Css.px 10) ] ]
+        [ div
+            [ class "flex", styles [ Css.justifyContent Css.spaceAround ] ]
+            routeView
+        ]
 
 
-main : Program (Maybe Model) Model Msg
+main : Program (Maybe Value) Model Msg
 main =
     Navigation.programWithFlags UrlChange
         { view = view

@@ -80,3 +80,12 @@ ul {
 .flex-item-grow {
   flex: 1;
 }
+
+.card {
+  height: 50px;
+  background-color: green;
+}
+
+.display-none {
+  display: none;
+}
