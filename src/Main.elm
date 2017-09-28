@@ -112,7 +112,7 @@ type alias Model =
     , collectionUid : Int
     , newCollection : NewCollection
     , location : Location
-    , dragDrop : DragDrop.Model ( Collection, Entry ) Collection
+    , dragDrop : DragDrop.Model ( Collection, Entry ) ( Collection, Entry )
 
     -- , result : DragDrop.Model ( Collection, Entry ) Int
     -- , droppableSection : ( Collection, Entry )
@@ -235,7 +235,7 @@ type Msg
     | MoveEntryWithinCollection Collection
     | UrlChange Location
     | GoHome
-    | DragDropMsg (DragDrop.Msg ( Collection, Entry ) Collection)
+    | DragDropMsg (DragDrop.Msg ( Collection, Entry ) ( Collection, Entry ))
 
 
 getIndexOf : a -> List a -> Maybe Int
@@ -580,14 +580,17 @@ update msg model =
                 ( model_, result ) =
                     DragDrop.update msg_ model.dragDrop
 
+                -- ( ( srcCollection, entry ), ( destinationCollection, targetEntry ) ) =
+                --     result
+                --         |> Maybe.withDefault False
                 _ =
-                    Debug.log "there it is" result
+                    Maybe.map (Debug.log "there it is") result
             in
             ( { model
                 | dragDrop = model_
                 , collections =
                     case result of
-                        Just ( ( srcCollection, entry ), destinationCollection ) ->
+                        Just ( ( srcCollection, entry ), ( destinationCollection, targetEntry ) ) ->
                             if destinationCollection == srcCollection then
                                 model.collections
                             else
@@ -596,8 +599,14 @@ update msg model =
                                         removeEntryFromCollection entry.id srcCollection
 
                                     updatedDestinationCollection =
-                                        addEntryToEndOfCollection entry destinationCollection
+                                        { destinationCollection
+                                            | entries =
+                                                getIndexOf targetEntry destinationCollection.entries
+                                                    |> Maybe.map (\index -> addItemAfterIndex index entry destinationCollection.entries)
+                                                    |> Maybe.withDefault destinationCollection.entries
+                                        }
 
+                                    -- addEntryToEndOfCollection entry destinationCollection
                                     model_ =
                                         updateCollectionInModel updatedSrcCollection model
                                 in
@@ -611,6 +620,11 @@ update msg model =
 
         _ ->
             ( model, Cmd.none )
+
+
+addItemAfterIndex : Int -> a -> List a -> List a
+addItemAfterIndex index item collection =
+    List.take (index + 1) collection ++ [ item ] ++ List.drop (index + 1) collection
 
 
 
@@ -627,8 +641,8 @@ locationToRoute location =
                 , UrlParser.map Home top
                 ]
 
-        _ =
-            Debug.log "Urlchange" ( route, location )
+        -- _ =
+        --     Debug.log "Urlchange" ( route, location )
     in
     parsePath route location
 
@@ -719,7 +733,7 @@ viewEntry { collections, dragDrop } collection entry =
             else
                 style []
     in
-    li []
+    li (DragDrop.droppable DragDropMsg ( collection, entry ))
         [ div (class "flex flex-justify-between pad border" :: hideStyle :: DragDrop.draggable DragDropMsg ( collection, entry ))
             [ if isFirstCollection collection collections /= Just True then
                 viewArrow entry collection Left
@@ -738,19 +752,8 @@ viewEntry { collections, dragDrop } collection entry =
         ]
 
 
-droppableCardArea : Model -> Collection -> Html Msg
-droppableCardArea { dragDrop } collection =
-    let
-        dropId =
-            DragDrop.getDropId dragDrop
 
-        highlight =
-            if dropId |> Maybe.map ((==) collection) |> Maybe.withDefault False then
-                class "card"
-            else
-                class "display-none"
-    in
-    div (highlight :: []) []
+-- Model -> Collection ->
 
 
 viewCollection : Model -> Collection -> Html Msg
@@ -762,8 +765,11 @@ viewCollection model collection =
         dragId =
             DragDrop.getDragId model.dragDrop
 
+        -- entryIndex =
+        --     ( dropCollection, dropEntry )
+        --         |> Maybe.map (getIndexOf << fst)
         highlight =
-            if dropId |> Maybe.map ((==) collection) |> Maybe.withDefault False then
+            if dropId |> Maybe.map (\( dropCollection, _ ) -> dropCollection == collection) |> Maybe.withDefault False then
                 if dragId |> Maybe.map (\( { id }, entry ) -> id /= collection.id) |> Maybe.withDefault False then
                     style [ ( "background-color", "cyan" ) ]
                 else
@@ -778,13 +784,56 @@ viewCollection model collection =
             , Css.padding2 (Css.px 10) (Css.px 10)
             , Css.flex3 (Css.int 1) (Css.int 1) (Css.int 0)
             ]
-            :: highlight
-            :: DragDrop.droppable DragDropMsg collection
+            :: [ highlight ]
         )
         [ text collection.description
-        , ul [] (List.map (viewEntry model collection) collection.entries ++ [ droppableCardArea model collection ])
+        , ul [] (viewEntriesAndDroppableArea model collection)
         , viewAddEntry model.newEntry collection
         ]
+
+
+viewDroppableArea : Maybe ( Collection, Entry ) -> Html Msg
+viewDroppableArea dropId =
+    dropId
+        |> Maybe.map (\dropId_ -> div (class "card" :: DragDrop.droppable DragDropMsg dropId_) [])
+        |> Maybe.withDefault (text "")
+
+
+getDroppableAreaIndex : Model -> Collection -> Maybe ( Int, Maybe ( Collection, Entry ) )
+getDroppableAreaIndex { dragDrop } collection =
+    let
+        dropId =
+            DragDrop.getDropId dragDrop
+    in
+    dropId
+        |> Maybe.andThen
+            (\( dropCollection, dropEntry ) ->
+                if dropCollection == collection then
+                    getIndexOf dropEntry dropCollection.entries
+                else
+                    Nothing
+            )
+        |> Maybe.map (\index -> ( index, dropId ))
+
+
+viewEntriesAndDroppableArea : Model -> Collection -> List (Html Msg)
+viewEntriesAndDroppableArea model collection =
+    let
+        viewEntries =
+            List.map (viewEntry model collection) collection.entries
+    in
+    getDroppableAreaIndex model collection
+        |> Maybe.map (\index -> Debug.log "index" index)
+        |> Maybe.map
+            (\( index, dropId ) ->
+                viewEntries
+                    |> List.drop (index + 1)
+                    |> (++)
+                        [ viewDroppableArea dropId ]
+                    |> (++) (List.take (index + 1) viewEntries)
+            )
+        |> Maybe.withDefault viewEntries
+        |> Debug.log "entries"
 
 
 viewAddCollectionActions : Html Msg
